@@ -132,6 +132,7 @@ build_membership_query(int family, struct sockaddr* source,
             // iph->ip_dst.s_addr = IGMP_ALL_HOSTS;
             // iph->ip_dst.s_addr = htonl(0xe0000001);
             inet_pton(AF_INET, "224.0.0.1", &iph->ip_dst);
+            //TODO add Router Alert option
 
             /* IGMPv3 membership query */
             // https://tools.ietf.org/html/rfc3376#section-4.1
@@ -183,8 +184,7 @@ build_membership_query(int family, struct sockaddr* source,
             iph = (struct ip6_hdr*)cp;
             bzero(cp, sizeof(*iph));
             iph->ip6_vfc = (6 << 4);
-#define NEXTHDR_HOP 0
-            iph->ip6_nxt = NEXTHDR_HOP;
+            iph->ip6_nxt = IPPROTO_HOPOPTS;
             iph->ip6_hlim = 1;
             src_addr = (struct sockaddr_in6*)source;
             bcopy(&src_addr->sin6_addr, &iph->ip6_src,
@@ -195,7 +195,7 @@ build_membership_query(int family, struct sockaddr* source,
             cp += (sizeof(*iph) + sizeof(r_alert));
             mld_query_hdr = (struct mldv2_query*)cp;
             bzero(mld_query_hdr, sizeof(*mld_query_hdr));
-            mld_query_hdr->mld_icmp6_hdr.icmp6_type = 130;
+            mld_query_hdr->mld_icmp6_hdr.icmp6_type = MLD_LISTENER_QUERY;
 
             // MLD_V2_GENERAL_QUERY is 1 because why?
             // regardless, 130 is the value that goes here.
@@ -222,7 +222,7 @@ build_membership_query(int family, struct sockaddr* source,
             pseudo_hdr.zero[0] = 0;
             pseudo_hdr.zero[1] = 0;
             pseudo_hdr.zero[2] = 0;
-            pseudo_hdr.nxthdr = IPPROTO_ICMPV6; // 78; // htonl(IPPROTO_ICMPV6);
+            pseudo_hdr.nxthdr = IPPROTO_ICMPV6; // 58;
             struct iovec iovecs[2];
             iovecs[0].iov_base = &pseudo_hdr;
             iovecs[0].iov_len = sizeof(pseudo_hdr);

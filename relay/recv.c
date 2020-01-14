@@ -530,7 +530,6 @@ mld_decode(relay_instance* instance,
     /* Process IPv6 header */
     ip = (struct ip6_hdr*)cp;
     iphlen = sizeof(*ip);
-    pktlen -= sizeof(*ip);
     hdr_type = ip->ip6_nxt;
     cp += sizeof(*ip);
     while (hdr_type != IPPROTO_ICMPV6 && hdr_type != IPPROTO_NONE && iphlen <= pktlen) {
@@ -548,14 +547,13 @@ mld_decode(relay_instance* instance,
         return MEMBERSHIP_ERROR;
     }
 
-    if (ntohs(ip->ip6_plen) != pktlen) {
+    if (ntohs(ip->ip6_plen) != pktlen - sizeof(*ip)) {
         instance->stats.mld_len_bad++;
         return MEMBERSHIP_ERROR;
     }
 
     mld_hdr = (struct mldv2_query*)cp;
     pktlen -= iphlen;
-    pktlen += sizeof(*ip); /* compensation */
 
 #define MLD_MIMLEN (sizeof(struct mldv2_report) + sizeof(struct mldv2_record))
     if (pktlen < (int)MLD_MIMLEN) {
@@ -563,7 +561,7 @@ mld_decode(relay_instance* instance,
         return MEMBERSHIP_ERROR;
     }
 
-    if (0 /*to-do: implement ICMP checksum */) {
+    if (0 /*TODO: implement ICMP checksum */) {
         instance->stats.mld_checksum_bad++;
         return MEMBERSHIP_ERROR;
     }
@@ -669,8 +667,20 @@ relay_gw_nonce_extract(packet* pkt)
     cp = (u_int8_t*)pkt->pkt_data;
 
     if (len > (int)sizeof(u_int32_t)) {
-        cp += sizeof(u_int32_t);
-        len -= sizeof(u_int32_t);
+//        cp += sizeof(u_int32_t);
+//        len -= sizeof(u_int32_t);
+        // Check the P flag to make sure the query to send is the expected one
+        cp++;
+        len--;
+        if ((*cp && pkt->pkt_instance->tunnel_af == AF_INET) ||
+                (!(*cp) && pkt->pkt_instance->tunnel_af == AF_INET6)) {
+            if (relay_debug(pkt->pkt_instance)) {
+                fprintf(stderr, "AMT request has P flag requesting disabled family\n");
+            }
+            return 0;
+        }
+        cp += 3;
+        len -= 3;
 
         if (len >= (int)sizeof(u_int32_t)) {
             nonce = get_long(cp);
@@ -806,7 +816,7 @@ relay_select_src_addr(relay_instance* instance,
         default:
             fprintf(stderr, "internal error: unknown address family %d "
                     "in relay_select_src_addr\n", dst->family);
-            exit(1);
+            relay_exit(instance, 1);
             break;
     }
 
@@ -879,7 +889,7 @@ relay_create_recv_socket(relay_instance* instance, prefix_t* src_pfx)
             htons(instance->amt_port);
     }
 
-    rif->rif_sock = relay_socket_shared_init(instance->relay_af,
+    rif->rif_sock = relay_socket_shared_init(instance,
                   (struct sockaddr*)&src, relay_debug(instance));
 
     if (relay_debug(instance)) {
@@ -893,7 +903,7 @@ relay_create_recv_socket(relay_instance* instance, prefix_t* src_pfx)
     rc = event_add(rif->rif_ev, NULL);
     if (rc < 0) {
         fprintf(stderr, "error rif event_add: %s\n", strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 }
 
@@ -978,6 +988,7 @@ relay_send_advertisement(packet* pkt, u_int32_t nonce, prefix_t* from)
                   prefix2str(from, str3, sizeof(str3)));
         }
 
+        //TODO ensure this uses pkt->pkt_dport if it is not the AMT port
         rc = sendto(instance->relay_anycast_sock, instance->packet_buffer,
               len, MSG_DONTWAIT, dst_sa, dstlen);
         if (rc < 0) {
@@ -1256,13 +1267,14 @@ relay_packet_deq(int fd, short event, void* uap)
                                         group = tmprec->group;
                                         if (tmprec->nsrcs > 1) {
                                             tmprec->group = prefix_dup(group);
+                                            prefix_free(group);
                                             tmprec->nsrcs--;
                                         }
                                         tmpsrc = TAILQ_FIRST(
                                               &tmprec->src_head);
                                         source = tmpsrc->source;
                                         membership_tree_refresh(instance,
-                                              mt, pkt, group, source);
+                                              mt, pkt, tmprec->group, source);
                                         TAILQ_REMOVE(&tmprec->src_head,
                                               tmpsrc, src_next);
                                         prefix_free(source);
@@ -1341,7 +1353,7 @@ relay_packet_deq(int fd, short event, void* uap)
         if (rc < 0) {
             fprintf(stderr, "can't re-initialize packet timer: %s\n",
                   strerror(errno));
-            exit(1);
+            relay_exit(instance, 1);
         }
     }
 }
@@ -1406,7 +1418,7 @@ relay_packet_enq(relay_instance* instance, packet* pkt)
         if (rc < 0) {
             fprintf(stderr, "can't initialize packet timer: %s\n",
                   strerror(errno));
-            exit(1);
+            relay_exit(instance, 1);
         }
     }
 }
@@ -1735,7 +1747,8 @@ readcb(struct bufferevent* bev, void* uap)
         char* str;
         struct evbuffer *hdrbuf, *databuf = NULL;
 
-        str = evbuffer_readline(EVBUFFER_INPUT(bev));
+        //str = evbuffer_readline(EVBUFFER_INPUT(bev)) - Deprecated
+        str = evbuffer_readln(EVBUFFER_INPUT(bev), NULL, EVBUFFER_EOL_ANY);
         if (str) {
             char* cmd;
 
@@ -1758,6 +1771,7 @@ readcb(struct bufferevent* bev, void* uap)
                          * return file not found
                          */
                         bufferevent_disable(bev, EV_READ);
+                        free(str);
                         relay_close_url(url);
                         return;
                     }
@@ -1769,6 +1783,7 @@ readcb(struct bufferevent* bev, void* uap)
                      * return file not found
                      */
                     bufferevent_disable(bev, EV_READ);
+                    free(str);
                     relay_close_url(url);
                     return;
                 }
@@ -1777,10 +1792,12 @@ readcb(struct bufferevent* bev, void* uap)
                  * return operation not supported
                  */
                 bufferevent_disable(bev, EV_READ);
+                free(str);
                 relay_close_url(url);
                 return;
             }
         }
+        free(str);
         bufferevent_disable(bev, EV_READ);
         hdrbuf = evbuffer_new();
 
@@ -1909,13 +1926,16 @@ relay_accept_url(int fd, short flags, void* uap)
     url = relay_url_get(instance);
     url->url_sock = newfd;
     url->url_instance = instance;
-    url->url_bufev = bufferevent_new(newfd, readcb, writecb, errorcb, url);
+
+    url->url_bufev = bufferevent_socket_new(instance->event_base, newfd, 0);
+        // BEV_OPT_CLOSE_ON_FREE);
 
     if (url->url_bufev == NULL) {
-        fprintf(
-              stderr, "error url buffer event new: %s\n", strerror(errno));
-        exit(1);
+        fprintf(stderr, "error creating bufferevent, dropping request: %s\n", strerror(errno));
+        return;
     }
+    bufferevent_setcb(url->url_bufev, readcb, writecb, errorcb, url);
+    bufferevent_enable(url->url_bufev, EV_READ);
 
     bufferevent_setwatermark(url->url_bufev, EV_READ, (size_t)0, (size_t)0);
 }
@@ -1939,7 +1959,7 @@ relay_packet_insert_before(packet* pkt, const char* desc, unsigned int len)
     if (pkt->pkt_offset < len) {
         fprintf(stderr, "not enough offset space ahead of nonraw "
                 "packet for %s (%u < %u)\n", desc, pkt->pkt_offset, len);
-        exit(1);
+        relay_exit_wrapper(1);
     }
 
     pkt->pkt_len += len;
@@ -2161,14 +2181,14 @@ nonraw_data_read(int fd, short flags, void* uap)
             iph->ip_dst = pkt->pkt_dst->addr.sin;
 
             cp = relay_packet_insert_before(pkt, "amt header", 2);
-            *cp = 6;
+            *cp = AMT_MCAST_DATA;
             *(cp + 1) = 0;
 
             iph->ip_sum = csum((uint8_t*)iph, 4*iph->ip_hl);
             /*
             // this works, but can just be 0, the udp checksum is
             // optional in ip4.
-            // [TBD]: make udp checksum optional separately?
+            // TODO make udp checksum optional separately?
             uint8_t pshdr_v[4];
             pshdr_v[0] = 0;
             pshdr_v[1] = iph->ip_p;
@@ -2313,7 +2333,7 @@ nonraw_data_read(int fd, short flags, void* uap)
         default:
             fprintf(stderr, "internal error: unknown family %d in "
                     "nonraw_data_read\n", pkt->pkt_af);
-            exit(1);
+            relay_exit(instance, 1);
         }
 
         relay_packet_enq(instance, pkt);
@@ -2488,7 +2508,12 @@ data_group_change(grnode* gr, int operation)
     relay_instance* instance = gr->gr_instance;
     // for raw socket (if set), make it listen for the right
     // mac address.
-    if (BIT_TEST(instance->relay_flags, RELAY_FLAG_NONRAW)) {
+    /*
+     * XXX this was unnegated, so it was never run since BIT_TEST is negated in earlier if statement
+     * Changed it so it is negated here also, which makes sense since above
+     * comment says that it expects a raw socket
+     */
+    if (!BIT_TEST(instance->relay_flags, RELAY_FLAG_NONRAW)) {
         struct packet_mreq preq;
         bzero(&preq, sizeof(preq));
         preq.mr_ifindex = instance->cap_iface_index;
@@ -2569,7 +2594,7 @@ data_group_added(grnode* gr)
         // group's mac address.
         if (data_group_change(gr, PACKET_ADD_MEMBERSHIP)) {
             fprintf(stderr, "error adding membership on raw socket\n");
-            exit(1);
+            relay_exit(instance, 1);
         }
 
         // we also need an ip socket, so we can join and leave at the
@@ -2588,7 +2613,7 @@ data_group_added(grnode* gr)
 
             if (nonraw_socket_init(gv)) {
                 fprintf(stderr, "error initializing nonraw socket\n");
-                exit(1);
+                relay_exit(instance, 1);
             }
         }
     }
@@ -2604,7 +2629,7 @@ data_group_removed(grnode* gr)
         // group's mac address.
         if (data_group_change(gr, PACKET_DROP_MEMBERSHIP)) {
             fprintf(stderr, "error adding membership on raw socket\n");
-            exit(1);
+            relay_exit(instance, 1);
         }
     }
 }
@@ -2866,7 +2891,7 @@ raw_socket_read(int fd, short flags, void* uap)
         default:
             fprintf(stderr, "internal error: unknown family %d in "
                     "nonraw_data_read\n", pkt->pkt_af);
-            exit(1);
+            relay_exit(instance, 1);
         }
 
         // insert amt data header before
@@ -2894,14 +2919,14 @@ relay_raw_socket_init(relay_instance* instance)
         default:
             fprintf(stderr, "internal error: unknown tunnel_af: %d\n",
                     instance->tunnel_af);
-            exit(1);
+            relay_exit(instance, 1);
             return;
     }
     sock = socket(AF_PACKET, SOCK_DGRAM, proto);
     if (sock < 0) {
         fprintf(stderr, "error creating data socket: %s\n",
                 strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     /*
@@ -2915,7 +2940,7 @@ relay_raw_socket_init(relay_instance* instance)
     if (rc < 0) {
         fprintf(stderr, "error binding data sock to interface: (%s) %s\n",
                 ifr.ifr_name, strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
     */
     // http://man7.org/linux/man-pages/man7/packet.7.html
@@ -2934,19 +2959,19 @@ relay_raw_socket_init(relay_instance* instance)
     if (rc < 0) {
         fprintf(stderr, "error binding data sock to interface: (%s) %s\n",
                 instance->cap_iface_name, strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     rc = fcntl(sock, F_GETFL, 0);
     if (rc < 0) {
         fprintf(stderr, "error in GETFL: %s\n", strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
     rc = fcntl(sock, F_SETFL, rc | O_NONBLOCK);
     if (rc < 0) {
         fprintf(stderr, "error O_NONBLOCK on socket: %s\n",
                 strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     instance->relay_data_socket = sock;
@@ -2957,7 +2982,7 @@ relay_raw_socket_init(relay_instance* instance)
     if (rc < 0) {
         fprintf(stderr, "error raw socket event_add: %s\n",
                 strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     // we also need an ip socket, so we can join and leave at the
@@ -2967,7 +2992,7 @@ relay_raw_socket_init(relay_instance* instance)
     if (sock < 0) {
         fprintf(stderr, "error creating joining socket: %s\n",
                 strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     struct ifreq ifr;
@@ -2979,18 +3004,18 @@ relay_raw_socket_init(relay_instance* instance)
     if (rc < 0) {
         fprintf(stderr, "error binding data socket: (%s) %s\n",
                 ifr.ifr_name, strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
     rc = fcntl(sock, F_GETFL, 0);
     if (rc < 0) {
         fprintf(stderr, "error in GETFL: %s\n", strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
     rc = fcntl(sock, F_SETFL, rc | O_NONBLOCK);
     if (rc < 0) {
         fprintf(stderr, "error O_NONBLOCK on socket: %s\n",
                 strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
     instance->relay_joining_socket = sock;
 }

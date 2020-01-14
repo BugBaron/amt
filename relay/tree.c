@@ -56,6 +56,7 @@ static const char __attribute__((unused)) id[] =
 #include "prefix.h"
 #include "relay.h"
 #include "tree.h"
+#include "igmp.h"
 
 static mem_handle mem_grnode_handle = NULL;
 static mem_handle mem_sgnode_handle = NULL;
@@ -215,7 +216,7 @@ membership_leave(sgnode* sg)
         if (rc < 0) {
             fprintf(stderr, "error MCAST_LEAVE_GROUP sg socket: %s\n",
                   strerror(errno));
-            exit(1);
+            relay_exit(instance, 1);
         }
     } else {
         /* SSM */
@@ -261,7 +262,7 @@ membership_leave(sgnode* sg)
             fprintf(stderr,
                   "error MCAST_LEAVE_SOURCE_GROUP sg socket: %s\n",
                   strerror(errno));
-            exit(1);
+            relay_exit(instance, 1);
         }
 
         data_group_removed(gr);
@@ -285,8 +286,8 @@ membership_join(sgnode* sg)
         char src_addr[MAX_ADDR_STRLEN], group_addr[MAX_ADDR_STRLEN];
         if (sg->sg_source) {
             fprintf(stderr, "Sending join msg: %s/%s\n",
-                  prefix2str(sg->sg_source, src_addr, MAX_ADDR_STRLEN),
-                  prefix2str(sg->sg_group, group_addr, MAX_ADDR_STRLEN));
+                  prefix2str(sg->sg_group, group_addr, MAX_ADDR_STRLEN),
+                  prefix2str(sg->sg_source, src_addr, MAX_ADDR_STRLEN));
         } else {
             fprintf(stderr, "Sending join msg: %s\n",
                   prefix2str(sg->sg_group, group_addr, MAX_ADDR_STRLEN));
@@ -331,11 +332,10 @@ membership_join(sgnode* sg)
                 MCAST_JOIN_SOURCE_GROUP, &gsreq, sizeof(gsreq));
 
         if (rc < 0) {
-            fprintf(stderr,
-                    "error MCAST_JOIN_SOURCE_GROUP sg socket: %s\n",
-                    strerror(errno));
-            exit(1);
-        }
+            fprintf(stderr, "error MCAST_JOIN_SOURCE_GROUP sg socket: %s\n",
+					strerror(errno));
+			relay_exit(instance, 1);
+		}
     } else {
         struct group_req greq;
         greq.gr_interface = instance->cap_iface_index;
@@ -365,7 +365,7 @@ membership_join(sgnode* sg)
         if (rc < 0) {
             fprintf(stderr, "error MCAST_JOIN_GROUP sg socket: %s\n",
                   strerror(errno));
-            exit(1);
+            relay_exit(instance, 1);
         }
     }
 }
@@ -400,7 +400,7 @@ clean_after_gwdelete(sgnode* sg)
                     if (rc < 0) {
                         fprintf(stderr, "error deleting gr event: %s\n",
                                 strerror(errno));
-                        exit(1);
+                        relay_exit(instance, 1);
                     }
                     event_free(gv->gv_receive_ev);
                     gv->gv_receive_ev = NULL;
@@ -462,10 +462,57 @@ gw_delete(gw_t* gw)
 
     /* Delete this gw from the tree */
     pat_delete(&sg->sg_gwroot, &gw->gw_node);
-    /* Canncel the idle timer for this gw */
+    /* Cancel the idle timer for this gw */
     evtimer_del(gw->idle_timer);
 
     relay_gw_free(gw);
+}
+
+// free groups/sources/gateways that are still joined
+void
+relay_free_groups(pat_handle* relay_groot)
+{
+    patext* pat = pat_getnext(relay_groot, NULL, 0);
+    patext* sourcepat = NULL;
+    patext* gwpat = NULL;
+    grnode* gr = NULL;
+    sgnode* sg = NULL;
+
+    while (pat) {
+        gr = pat2gr(pat);
+        if (!pat_empty(&gr->gr_sgroot)) {
+            sourcepat = pat_getnext(&gr->gr_sgroot, NULL, 0);
+            while (sourcepat) {
+                sg = pat2sg(sourcepat);
+                gwpat = pat_getnext(&sg->sg_gwroot, NULL, 0);
+                while (gwpat) {
+                    gw_delete(pat2gw(gwpat));
+                    gwpat = pat_getnext(&sg->sg_gwroot, NULL, 0);
+                }
+                if (gr->gr_sgcount > 1) {
+                    clean_after_gwdelete(sg); // This removes all the group and source nodes
+                    sourcepat = pat_getnext(&gr->gr_sgroot, NULL, 0);
+                } else {
+                    clean_after_gwdelete(sg);
+                    goto relay_free_groups_skip_asm;
+                }
+            }
+        }
+        if (gr->gr_asmnode) {
+            sg = gr->gr_asmnode;
+            gwpat = pat_getnext(&sg->sg_gwroot, NULL, 0);
+            while (gwpat) {
+                gw_delete(pat2gw(gwpat));
+                gwpat = pat_getnext(&sg->sg_gwroot, NULL, 0);
+            }
+            clean_after_gwdelete(sg);
+        }
+relay_free_groups_skip_asm:
+        if (!pat_empty(relay_groot))
+            pat = pat_getnext(relay_groot, NULL, 0);
+        else
+            break;
+    }
 }
 
 void
@@ -586,7 +633,7 @@ gw_add(sgnode* sg, prefix_t* pfx)
         if (!gw->idle_timer) {
             fprintf(stderr, "can't initialize gw idle timer(add): %s\n",
                   strerror(errno));
-            exit(1);
+            relay_exit(sg->sg_grnode->gr_instance, 1);
         }
     }
 
@@ -619,7 +666,7 @@ gw_update(gw_t* gw,
     if (rc < 0) {
         fprintf(stderr, "can't initialize gw idle timer(update): %s\n",
               strerror(errno));
-        exit(1);
+        relay_exit(gw->gw_sg->sg_grnode->gr_instance, 1);
     }
 }
 
@@ -919,7 +966,7 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
     {
     uint8_t* cp = pkt->pkt_data;
     if (relay_debug(instance)) {
-        printf("%02x%02x%02x%02x %02x%02x%02x%02x "
+        fprintf(stderr, "%02x%02x%02x%02x %02x%02x%02x%02x "
                "%02x%02x%02x%02x %02x%02x%02x%02x\n"
                "%02x%02x%02x%02x %02x%02x%02x%02x "
                "%02x%02x%02x%02x %02x%02x%02x%02x (len=%u gw_forward %p)\n",

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <getopt.h>
+#include <unistd.h>
 #include "relay.h"
 
 typedef struct ConfigInput_s {
@@ -114,8 +115,6 @@ handle_relay_family(ConfigInput* input, const char* value)
             " RelayFamily (-n/--net-relay)");
 }
 
-
-
 static int
 handle_uint16(uint16_t* val, const char* value, const char* name)
 {
@@ -191,14 +190,14 @@ handle_nonraw_port(ConfigInput* input, const char* value)
         return rc;
     }
     u_int16_t* new_ptr = realloc(instance->nonraw_ports,
-            sizeof(u_int16_t)*(instance->nonraw_count +1));
+            sizeof(u_int16_t)*(instance->nonraw_count + 1));
     if (!new_ptr) {
         if (instance->nonraw_ports) {
             free(instance->nonraw_ports);
         }
         fprintf(stderr, "oom while allocating nonraw port %u\n",
                 (unsigned int)instance->nonraw_count);
-        exit(1);
+        relay_exit(instance, 1);
     }
     BIT_SET(instance->relay_flags, RELAY_FLAG_NONRAW);
     instance->nonraw_ports = new_ptr;
@@ -418,7 +417,7 @@ config_read(ConfigInput* input, const char* fname)
     FILE* fp = fopen(fname, "r");
     if (!fp) {
         fprintf(stderr, "Error opening config file \"%s\": %s\n", fname, strerror(errno));
-        exit(1);
+        relay_exit(input->instance, 1);
     }
 
     while (0 != (data = fgets(buf, sizeof(buf), fp))) {
@@ -436,7 +435,7 @@ config_read(ConfigInput* input, const char* fname)
             if (rc) {
                 fprintf(stderr, "config error: file \"%s\" line %u op %s\n",
                         fname, line, op);
-                exit(1);
+                relay_exit(input->instance, 1);
             }
         }
 
@@ -446,7 +445,7 @@ config_read(ConfigInput* input, const char* fname)
     if (ferror(fp)) {
         fprintf(stderr, "Error reading config file \"%s\", line %u: %s\n",
                 fname, line, strerror(errno));
-        exit(1);
+        relay_exit(input->instance, 1);
     }
 
     fclose(fp);
@@ -458,26 +457,53 @@ config_read(ConfigInput* input, const char* fname)
 static void
 usage(char* name)
 {
-    fprintf(stderr, "usage: %s -a <ip> -c <interface> [options]\n"
-            "  Options:\n"
-            "    -a/--discovery-addr <ip>: IP (matching -l) to listen for AMT discovery packets on\n"
-            "    -r/--relay-addr <ip>: IP (matching -l) to use for discovery response and for tunnel\n"
-            "    -s/--tunnel-addr <ip>: IP (matching -n) to use for source of queries inside the tunnel\n"
-            "    -c/--interface <ifname>: Interface to receive native multicast data\n"
-            "    -d/--debug: Turn on debugging messages\n"
-            "    -q/--queue-length <val>: Packets to handle at once (default 10)\n"
-            "    -b/--amt-port <val>: Port to use for AMT data (default 2268)\n"
-            "    -p/--port <val|\"none\">: port to listen for stats requests\n"
-            "    -n/--net-family <inet|inet6>: ip family for multicast data\n"
-            "    -l/--tun-family <inet|inet6>: ip family for AMT packets (discovery and \n"
-            "    -w/--non-raw <val>: (multiple ok) Accept data on this port. (By,\n"
-            "              defaultraw captures all. Adding this and \n"
-            "              icmp-suppress permits non-root, and captures only\n"
-            "              specified ports)\n"
-            "    -e/--external: data is arriving from an external interface\n"
-            "              (doesn't recompute checksums, since nic did it\n",
+	fprintf(stderr, "usage: %s [options]\n"
+	            " -f/--file <config-file>: load config file\n"
+	            "   AmtPort=<port>         sets another value besides 2268\n"
+	            "   DataInterface=<ifname> interface name for multicast data\n"
+	            "   DataPort=<port>        udp port of data traffic.  May appear\n"
+	            "                          multiple times, or use 'all' with\n"
+	            "                          privileges to open raw socket\n"
+	            "   DebugLevel=<0 or 1>    disable/enable debug output\n"
+	            "   DequeueLen=<num>       default 10.  make it bigger at high volume if\n"
+	            "                          dropping packets.\n"
+	            "   DiscoveryAddr=<ip>     IP address of local interface to listen for\n"
+	            "                          AMT connections on.  Must match RelayFamily.\n"
+	            // suppressing NatMode in help, I don't think this works and
+	            // I'm not using it inside nat. --jake 2019-08-29
+	            // "   NatMode=<0/1>          not sure what this does...\n"
+	            "   RelayAddr=<ip>         Public IP address of relay (probably same as\n"
+	            "                          DiscoveryAddr unless inside a NAT)\n"
+	            "   ExternalData=<0/1>     Set to 1 if data has already had UDP checksum\n"
+	            "                          checked before packet receipt (not true for\n"
+	            "                          packets generated on the same host...)\n"
+	            "   RelayFamily=<inet/inet6> Addr family for Data traffic\n"
+	            "   RelayUrlPort=<port>    port for http://127.0.0.1:port/show-stats,\n"
+	            "                          show-streams, and show-memory.  0 to disable\n"
+	            "   SuppressICMP=<0/1>     Don't try to receive or handle ICMP (opening\n"
+	            "                          the socket for this requires privileges)\n"
+	            "   TunnelAddr=<ip>        IP Address of the membership query.  Source\n"
+	            "                          addr of data is a good choice.\n"
+	            "   TunnelFamily=<inet/inet6> Addr family for data packets\n\n"
+	            " Using SuppressICMP=1 and setting specific DataPort values permits\n"
+	            " running as non-root.\n\n"
+	            " command line overrides for config file:\n"
+	            "   -a/--discovery-addr <ip>: DiscoveryAddr\n"
+	            "   -r/--relay-addr <ip>: RelayAddr\n"
+	            "   -s/--tunnel-addr <ip>: TunnelAddr\n"
+	            "   -c/--interface <ifname>: DataInterface\n"
+	            "   -d/--debug: (like DebugLevel=1)\n"
+	            "   -i/--icmp-suppress: (like SuppressICMP=1)\n"
+	            "   -q/--queue-length <val>: DequeueLen\n"
+	            "   -b/--amt-port <val>: AmtPort\n"
+	            "   -p/--port <val|\"none\">: RelayUrlPort\n"
+	            "   -n/--net-relay <inet|inet6>: RelayFamily\n"
+	            "   -l/--tun-relay <inet|inet6>: TunnelFamily\n"
+	            "   -w/--non-raw <val>: (multiple ok) DataPort=<val>\n"
+	            "   -e/--external: (like ExternalData=1)\n"
+	            " (config file is optional if enough command line args provided)\n",
           name);
-    exit(1);
+    relay_exit_wrapper(1);
 }
 
 int
@@ -569,17 +595,17 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
             case 'f':
                 if (optarg == NULL) {
                     fprintf(stderr, "must specify config file with -f\n");
-                    exit(1);
+                    relay_exit(instance, 1);
                 }
                 if (config_read(&input, optarg) != 0) {
                     fprintf(stderr, "failure parsing config file %s",
                           optarg);
-                    exit(1);
+                    relay_exit(instance, 1);
                 }
                 break;
             case 't':
                 if (optarg == NULL) {
-                    // fprintf( stderr, "must specify the queueing threshold (-t 100 default, in ms)\n");
+                    // fprintf(stderr, "must specify the queueing threshold (-t 100 default, in ms)\n");
                 }
                 // instance->qdelay_thresh = strtol(optarg, NULL, 10);
             case 'u':
@@ -594,7 +620,7 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
         if (rc) {
             fprintf(stderr, "error parsing command line args at %c (%s)\n",
                     ch, optarg?optarg:"(no arg)");
-            exit(1);
+            relay_exit(instance, 1);
         }
     }
 
@@ -607,7 +633,7 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
         } else {
             fprintf(stderr, "Error finalizing config from command line.\n");
         }
-        exit(1);
+        relay_exit(instance, 1);
     }
     if (input.last_fname) {
         free(input.last_fname);

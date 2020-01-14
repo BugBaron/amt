@@ -40,6 +40,7 @@
 #include <stdint.h>
 #include <sys/queue.h>
 #include <event.h>
+#include <linux/limits.h>
 #include "amt.h"
 #include "prefix.h"
 #include "utils.h"
@@ -113,8 +114,8 @@ typedef struct _relay_instance
 {
     TAILQ_ENTRY(_relay_instance) relay_next; /* list */
     int relay_flags;                         /* instance flags */
-    int relay_af;                            /* address family for relay */
-    int tunnel_af;          /* address family for tunneled protocols*/
+    int relay_af;           /* address family for relay, so it is what tunnel_af is encapsulated in*/
+    int tunnel_af;          /* address family for tunneled protocols, so passed into tunnel*/
     int relay_anycast_sock; /* anycast socket */
     struct event *relay_anycast_ev;       /* libevent handle */
     pat_handle relay_groot;               /* group/source patricia tree */
@@ -125,11 +126,10 @@ typedef struct _relay_instance
     int relay_url_sock;                  /* socket for URL requests */
     struct event *relay_url_ev;           /* libevent handle */
     u_int16_t relay_url_port; /* port to listen for URL requests */
+
     char passphrase[NAMELEN]; /* local secret for HMAC-MD5 */
     u_int8_t packet_buffer[BUFFER_SIZE]; /* transmit/recv buffer */
     int dequeue_count; /* number of packets to dequeue at once */
-    struct event *sk_listen_ev;
-    struct event *sk_read_ev;
     unsigned int dropped_noreceiver;
     time_t last_droppedmsg_t;
     u_int64_t agg_qdelay;    /* Aggregate queueing delay for mcast data */
@@ -148,7 +148,7 @@ typedef struct _relay_instance
     int relay_joining_socket;  /* an ip socket that can do joins when raw */
 
     unsigned int relay_grcount;
-    unsigned int relay_sgcount;          /* includes ASM gorups */
+    unsigned int relay_sgcount;          /* includes ASM groups */
     char cap_iface_name[16]; // IFNAMSIZ might be better here.
     struct sockaddr_storage tunnel_addr; /* IP address used as the source addr for membership queries */
     struct sockaddr_storage listen_addr; /* IP address to listen for packets from gateways */
@@ -339,9 +339,10 @@ typedef struct _group_record
 } group_record_t;
 
 void relay_instance_read(int, short, void*);
+void _relay_exit(relay_instance* instance, int signal);
 void relay_accept_url(int, short, void*);
 void relay_sg_except_read(int, short, void*);
-int relay_socket_shared_init(int family, struct sockaddr*, int debug);
+int relay_socket_shared_init(relay_instance*, struct sockaddr*, int debug);
 void relay_rif_free(recv_if*);
 void data_group_added(grnode* gr);
 void data_group_removed(grnode* gr);
@@ -351,10 +352,13 @@ int relay_parse_command_line(relay_instance* instance,
         int argc, char** argv);
 void relay_raw_socket_init(relay_instance* instance);
 
-#define exit(x) do { \
+#define relay_exit(instance, x) do { \
     fprintf(stderr, "exit(%d): %s:%d\n", x, __FILE__, __LINE__); \
-    char* c = 0; \
-    sprintf(c, "time to crash please"); \
+    _relay_exit(instance, x); \
+} while(0)
+#define relay_exit_wrapper(x) do { \
+    fprintf(stderr, "exit(%d): %s:%d\n", x, __FILE__, __LINE__); \
+    _relay_exit(NULL, x); \
 } while(0)
 
 #endif // AMT_RELAY_RELAY_H

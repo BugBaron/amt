@@ -129,6 +129,7 @@ put_short(u_int8_t* cp, u_int16_t value)
 
 /*
  * copy 32 bits in host byte order into continuous memory
+ * hotnl or ntohl alias too
  */
 static inline u_int8_t*
 put_long(u_int8_t* cp, u_int32_t value)
@@ -152,6 +153,7 @@ get_short(u_int8_t* cp)
     return value;
 }
 
+// hotnl or ntohl alias too
 static inline u_int32_t
 get_long(u_int8_t* cp)
 {

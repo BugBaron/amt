@@ -172,7 +172,7 @@ init_iftun_device(gw_t* gw)
 
         sd = socket(gw->data_family, SOCK_DGRAM, 0);
         if (sd < 0) {
-            perror("socket failed");
+            fprintf(stderr, "socket failed");
             close(fd);
             return -1;
         }
@@ -204,7 +204,7 @@ init_iftun_device(gw_t* gw)
             close(fd);
             return rc;
         }
-        printf("membership socket added\n");
+        fprintf(stderr, "membership socket added\n");
         gw->membership_ev = event_new(gw->event_base, fd,
                 EV_READ | EV_PERSIST, gw_event_tun, (void*)gw);
         rc = event_add(gw->membership_ev, NULL);
@@ -280,7 +280,7 @@ gw_receive_tun(gw_t* gw, int fd)
 #if 0
             {
             uint8_t* cp = gw->packet_buffer;
-            printf("gw_receive_tun\n%02x%02x%02x%02x %02x%02x%02x%02x "
+            fprintf(stderr, "gw_receive_tun\n%02x%02x%02x%02x %02x%02x%02x%02x "
                    "%02x%02x%02x%02x %02x%02x%02x%02x\n"
                    "%02x%02x%02x%02x %02x%02x%02x%02x "
                    "%02x%02x%02x%02x %02x%02x%02x%02x\n",

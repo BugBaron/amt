@@ -60,6 +60,7 @@ static const char __attribute__((unused)) id[] =
 #include "pat.h"
 #include "prefix.h"
 #include "relay.h"
+#include "tree.h"
 
 static struct instances instance_head;
 static mem_handle mem_rinstance_handle = NULL;
@@ -115,6 +116,7 @@ relay_instance_alloc(int af)
 static void
 relay_instance_free(relay_instance* instance)
 {
+    relay_free_groups(&instance->relay_groot);
     TAILQ_REMOVE(&instance_head, instance, relay_next);
     if (instance->relay_anycast_ev) {
         event_free(instance->relay_anycast_ev);
@@ -128,18 +130,11 @@ relay_instance_free(relay_instance* instance)
         event_free(instance->relay_pkt_timer);
         instance->relay_pkt_timer = NULL;
     }
-    if (instance->sk_listen_ev) {
-        event_free(instance->sk_listen_ev);
-        instance->sk_listen_ev = NULL;
-    }
-    if (instance->sk_read_ev) {
-        event_free(instance->sk_read_ev);
-        instance->sk_read_ev = NULL;
-    }
     if (instance->icmp_sk_ev) {
         event_free(instance->icmp_sk_ev);
         instance->icmp_sk_ev = NULL;
     }
+
     patext* pat;
     pat = pat_getnext(&instance->rif_root, NULL, 0);
     while (pat) {
@@ -148,6 +143,11 @@ relay_instance_free(relay_instance* instance)
         relay_rif_free(rif);
         pat = pat_getnext(&instance->rif_root, NULL, 0);
     }
+    if (instance->relay_raw_receive_ev) {
+		event_free(instance->relay_raw_receive_ev);
+		instance->relay_raw_receive_ev = NULL;
+	}
+
     if (instance->event_base) {
         event_base_free(instance->event_base);
         instance->event_base = NULL;
@@ -159,6 +159,16 @@ relay_instance_free(relay_instance* instance)
     }
 
     mem_type_free(mem_rinstance_handle, instance);
+}
+
+void
+_relay_exit(relay_instance* instance, int status)
+{
+    if (instance) {
+        relay_instance_free(instance);
+        mem_shutdown();
+    }
+    exit(status);
 }
 
 static int
@@ -264,26 +274,26 @@ relay_icmp_init(relay_instance* instance)
 
     if ((proto = getprotobyname("ICMP")) == NULL) {
         fprintf(stderr, "failed to get ICMP protocol\n");
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     instance->icmp_sk = socket(AF_INET, SOCK_RAW, proto->p_proto);
     if (instance->icmp_sk < 0) {
         fprintf(stderr, "ICMP socket init failed: %s\n", strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     if (socket_set_non_blocking(instance->icmp_sk) < 0) {
         fprintf(stderr, "ICMP socket nonblocking failed: %s\n",
               strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     instance->icmp_sk_ev = event_new(instance->event_base,
             instance->icmp_sk, EV_READ | EV_PERSIST, icmp_recv, instance);
     if (event_add(instance->icmp_sk_ev, NULL)) {
         fprintf(stderr, "ICMP socket event failed\n");
-        exit(1);
+        relay_exit(instance, 1);
     }
 }
 
@@ -293,7 +303,7 @@ relay_event_init(relay_instance* instance)
     instance->event_base = event_base_new();
     if (instance->event_base == NULL) {
         fprintf(stderr, "event_base_new failed\n");
-        exit(1);
+        relay_exit(instance, 1);
     }
 }
 
@@ -335,32 +345,32 @@ relay_signal_init(relay_instance* instance)
 }
 
 int
-relay_socket_shared_init(int family,
+relay_socket_shared_init(relay_instance* instance,
       struct sockaddr* bind_addr, int debug)
 {
     int rc, val, len, sock;
     char str[MAX_SOCK_STRLEN];
 
-    sock = socket(family, SOCK_DGRAM, IPPROTO_UDP);
+    sock = socket(instance->relay_af, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         fprintf(stderr, "error creating socket: %s\n", strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     val = TRUE; len = sizeof(val);
     rc = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &val, len);
     if (rc < 0) {
         fprintf(stderr, "error SO_REUSEADDR socket: %s\n", strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     if (bind_addr) {
         int bind_addr_len = 0;
-        if (family == AF_INET) {
+        if (instance->relay_af == AF_INET) {
             bind_addr_len = sizeof(struct sockaddr_in);
             struct sockaddr_in* psa = (struct sockaddr_in*)bind_addr;
             psa->sin_family = AF_INET;
-        } else if (family == AF_INET6) {
+        } else if (instance->relay_af == AF_INET6) {
             bind_addr_len = sizeof(struct sockaddr_in6);
             struct sockaddr_in6* psa = (struct sockaddr_in6*)bind_addr;
             psa->sin6_family = AF_INET6;
@@ -368,13 +378,13 @@ relay_socket_shared_init(int family,
         rc = bind(sock, bind_addr, bind_addr_len);
         if (rc < 0) {
             fprintf(stderr, "error binding socket to %s: %s\n",
-                    sock_ntop(family, bind_addr, str, sizeof(str)),
+                    sock_ntop(instance->relay_af, bind_addr, str, sizeof(str)),
                     strerror(errno));
-            exit(1);
+            relay_exit(instance, 1);
         }
         if (debug) {
             fprintf(stderr, "bound udp socket %d %s\n", sock,
-                    sock_ntop(family, bind_addr, str, sizeof(str)));
+                    sock_ntop(instance->relay_af, bind_addr, str, sizeof(str)));
         }
     }
 
@@ -387,27 +397,27 @@ relay_socket_shared_init(int family,
     if (rc < 0) {
         fprintf(stderr, "error IP_RECVDSTADDR on socket: %s\n",
               strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
     rc = setsockopt(sock, IPPROTO_IP, IP_RECVIF, &val, len);
     if (rc < 0) {
         fprintf(stderr, "error IP_RECVIF on socket: %s\n", strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 #else
-    if (family == AF_INET) {
+    if (instance->relay_af == AF_INET) {
         rc = setsockopt(sock, IPPROTO_IP, IP_PKTINFO, &val, len);
         if (rc < 0) {
             fprintf(stderr, "error IP_RECVDSTADDR on socket: %s\n",
                   strerror(errno));
-            exit(1);
+            relay_exit(instance, 1);
         }
     } else {
         rc = setsockopt(sock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &val, len);
         if (rc < 0) {
             fprintf(stderr, "error IPv6_RECVDSTADDR on socket: %s\n",
                   strerror(errno));
-            exit(1);
+            relay_exit(instance, 1);
         }
     }
 #endif
@@ -418,9 +428,8 @@ relay_socket_shared_init(int family,
     }
     rc = fcntl(sock, F_SETFL, val | O_NONBLOCK);
     if (rc < 0) {
-        fprintf(
-              stderr, "error O_NONBLOCK on socket: %s\n", strerror(errno));
-        exit(1);
+        fprintf(stderr, "error O_NONBLOCK on socket: %s\n", strerror(errno));
+        relay_exit(instance, 1);
     }
 
     return sock;
@@ -475,38 +484,54 @@ relay_url_init(relay_instance* instance)
                    instance->relay_af == AF_INET6);
     }
 
-    // val = TRUE;
-    // len = sizeof(val);
     sock = socket(instance->relay_af, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) {
         fprintf(stderr, "error creating URL socket (%s:%u): %s\n",
-                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                inet_ntop(family, addrp, str, sizeof(str)), port,
                 strerror(errno));
-        exit(1);
+		return;
     }
 
     rc = bind(sock, sa, salen);
     if (rc < 0) {
         fprintf(stderr, "error binding url socket (%s:%u): %s\n",
-                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                inet_ntop(family, addrp, str, sizeof(str)), port,
                 strerror(errno));
-        exit(1);
+        sin.sin_port = 0;
+        if (bind(sock, sa, salen) < 0) {
+        	close(sock);
+    		return;
+        }
     }
 
     rc = fcntl(sock, F_SETFL, O_NONBLOCK);
     if (rc < 0) {
         fprintf(stderr, "error O_NONBLOCK on url socket (%s:%u): %s\n",
-                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                inet_ntop(family, addrp, str, sizeof(str)), port,
                 strerror(errno));
-        exit(1);
+		close(sock);
+		return;
     }
 
     rc = listen(sock, 5);
     if (rc < 0) {
         fprintf(stderr, "error url listen on socket (%s:%u): %s\n",
-                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                inet_ntop(family, addrp, str, sizeof(str)), port,
                 strerror(errno));
-        exit(1);
+		close(sock);
+		return;
+    }
+
+    // show new port if port was reassigned
+    if (sin.sin_port == 0) {
+    	socklen_t len = sizeof(sin);
+    	if (getsockname(sock, &sin, &len) < 0) {
+    		fprintf(stderr, "failed to get socket information from getsockname\n");
+    		close(sock);
+    		return;
+    	}
+    	if (ntohs(sin.sin_port) != instance->relay_url_port)
+    		fprintf(stderr, "reassigned url port to %d\n", ntohs(sin.sin_port));
     }
 
     instance->relay_url_ev = event_new(instance->event_base, sock,
@@ -514,16 +539,17 @@ relay_url_init(relay_instance* instance)
     rc = event_add(instance->relay_url_ev, NULL);
     if (rc < 0) {
         fprintf(stderr, "error url event_add on socket (%s:%u): %s\n",
-                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                inet_ntop(family, addrp, str, sizeof(str)), port,
                 strerror(errno));
-        exit(1);
+		close(sock);
+        relay_exit(instance, 1);
     }
     instance->relay_url_sock = sock;
 }
 
 static void
 relay_anycast_socket_init(relay_instance* instance,
-      struct sockaddr* listen_addr)
+        struct sockaddr* listen_addr)
 {
     int rc;
 
@@ -535,7 +561,7 @@ relay_anycast_socket_init(relay_instance* instance,
         fprintf(stderr, "%p\n%p\n", &instance->listen_addr, listen_addr);
     }
     instance->relay_anycast_sock = relay_socket_shared_init(
-          instance->relay_af, listen_addr, relay_debug(instance));
+          instance, listen_addr, relay_debug(instance));
 
     instance->relay_anycast_ev = event_new(instance->event_base,
             instance->relay_anycast_sock, EV_READ | EV_PERSIST,
@@ -543,7 +569,7 @@ relay_anycast_socket_init(relay_instance* instance,
     rc = event_add(instance->relay_anycast_ev, NULL);
     if (rc < 0) {
         fprintf(stderr, "error anycast event_add: %s\n", strerror(errno));
-        exit(1);
+        relay_exit(instance, 1);
     }
 }
 
@@ -555,10 +581,16 @@ main(int argc, char** argv)
     instance = relay_instance_alloc(AF_INET);
 
     int rc;
-    rc = relay_parse_command_line(instance, argc, argv);
+
+    if (argc > 1) {
+      rc = relay_parse_command_line(instance, argc, argv);
+    } else {
+      char* help_argv[3] = { argv[0], "--help", 0 };
+      rc = relay_parse_command_line(instance, 2, help_argv);
+    }
     if (rc) {
         fprintf(stderr, "failure parsing command line args\n");
-        exit(1);
+        relay_exit(instance, 1);
     }
 
     relay_event_init(instance);
@@ -586,8 +618,6 @@ main(int argc, char** argv)
     } else {
         fprintf(stderr, "event_base_dispatch completed\n");
     }
-    relay_instance_free(instance);
-    mem_shutdown();
-
-    return rc;
+    _relay_exit(instance, rc);
+    return -1;
 }

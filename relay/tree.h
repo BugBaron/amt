@@ -43,5 +43,6 @@ void membership_tree_refresh(relay_instance*,
       prefix_t*,
       prefix_t*);
 void relay_forward(packet*);
+void relay_free_groups(pat_handle* relay_groot);
 
 #endif  // AMT_RELAY_TREE_H

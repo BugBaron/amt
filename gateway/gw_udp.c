@@ -88,6 +88,18 @@ gw_request_free(request_t* rq)
     free(rq);
 }
 
+void
+gw_request_free_all(struct requests* rqs)
+{
+    request_t* rq;
+    for (rq = TAILQ_FIRST(rqs); rq; rq = TAILQ_FIRST(rqs))
+    //TAILQ_FOREACH(rq, rqs, rq_next) // this causes bad reads on freed elements
+    {
+        gw_request_free(rq);
+    }
+}
+
+
 static void
 gw_send_request(gw_t* gw, request_t* rq)
 {
@@ -102,7 +114,7 @@ gw_send_request(gw_t* gw, request_t* rq)
     cp = (u_int8_t*)gw->packet_buffer;
 
     *cp++ = AMT_REQUEST;
-    *cp++ = 0; /* reserved */
+    *cp++ = gw->data_family == AF_INET6 ? 1 : 0; /* P flag */
     *cp++ = 0; /* reserved */
     *cp++ = 0; /* reserved */
 
@@ -402,7 +414,8 @@ gw_recv_advertisement(gw_t* gw, u_int8_t* cp, int len)
 #ifdef BSD
             sin->sin_len = sizeof(struct sockaddr_in);
 #endif
-            sin->sin_port = htons(AMT_PORT);
+            //sin->sin_port = htons(AMT_PORT);
+            sin->sin_port = htons(gw->amt_port);
             bcopy(cp, &sin->sin_addr, sizeof(struct in_addr));
             cp += sizeof(struct in_addr);
             len -= sizeof(struct in_addr);
@@ -420,7 +433,8 @@ gw_recv_advertisement(gw_t* gw, u_int8_t* cp, int len)
 #ifdef BSD
             sin->sin6_len = sizeof(struct sockaddr_in6);
 #endif
-            sin->sin6_port = htons(AMT_PORT);
+            //sin->sin6_port = htons(AMT_PORT);
+            sin->sin6_port = htons(gw->amt_port);
             bcopy(cp, &sin->sin6_addr, sizeof(struct in6_addr));
             cp += sizeof(struct in6_addr);
             len -= sizeof(struct in6_addr);
@@ -569,7 +583,7 @@ gw_recv_query(gw_t* gw, u_int8_t* cp, int len)
               gw->name);
         return;
     }
-    nonce = ntohl(get_long_native(cp));
+    nonce = get_long((uint8_t*) cp);
     cp += sizeof(u_int32_t);
     len -= sizeof(u_int32_t);
 
@@ -639,7 +653,7 @@ gw_recv_query(gw_t* gw, u_int8_t* cp, int len)
             break;
             case AF_INET6:
             {
-                // TBD: parse the qqi and mrt properly to decide when
+                // TODO: parse the qqi and mrt properly to decide when
                 // to send a query.
             }
             break;

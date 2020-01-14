@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <getopt.h>
+#include <linux/limits.h>
+#include <unistd.h>
 #include "gw.h"
 
 typedef struct ConfigInput_s {
@@ -530,8 +532,6 @@ gateway_parse_command_line(gw_t* instance, int argc, char** argv)
         { "file", required_argument, 0, 'f' },
         { "help", no_argument, 0, 'h' }
     };
-
-    instance->amt_port = 2268;
 
     while ((ch = getopt_long(argc, argv, "a:b:c:dl:n:r:s:t:f:h",
                   long_options, NULL)) != EOF) {

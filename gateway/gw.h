@@ -124,6 +124,8 @@ typedef struct _gw_t
     struct event *udp_disco_ev;             /* discovery read event */
     struct event *udp_event_ev;             /* udp read event */
     struct event *local_query_tev;          /* send local query on timer */
+    struct event *sigterm_ev;         /* listens for SIGTERM */
+    struct event *sigint_ev;         /* listens for SIGTERM */
 } gw_t;
 
 typedef struct _request_t
@@ -176,6 +178,7 @@ int gw_init_dbg_sock(gw_t*);
 int gateway_parse_command_line(gw_t* instance, int argc, char** argv);
 int socket_set_non_blocking(int s);
 int gw_send_local_membership_query(gw_t* gw);
+void gw_request_free_all(struct requests* rqs);
 
 #endif  // AMT_GATEWAY_GW_H
 

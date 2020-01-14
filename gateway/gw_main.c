@@ -108,10 +108,87 @@ gw_reconfig(int sig)
     /* XXX */
 }
 
-static void
-gw_shutdown(int sig)
+//static void
+//gw_shutdown(int sig)
+//{
+//    /* XXX */
+//    char pidpath[PATH_MAX];
+//    fprintf(stderr, "Terminating amtgwd\n");
+//    snprintf(pidpath, MAXPATHLEN, "%s/%s.pid", GW_PID_FILE_PATH, "amtgwd");
+//    unlink(pidpath);
+//    exit(0);
+//}
+
+void
+gw_event_loopbreak (int fd, short flags, void* uap)
 {
-    /* XXX */
+    gw_t* gw;
+    gw = (gw_t*) uap;
+
+    event_base_loopbreak(gw->event_base);
+}
+
+void
+gw_free (gw_t* gw)
+{
+    gw_request_free_all(&gw->request_head);
+    if (gw->tundev) {
+        close(gw->tundev);
+        gw->tundev = 0;
+    }
+
+    if (gw->membership_ev) {
+        event_free(gw->membership_ev);
+        gw->membership_ev = NULL;
+    }
+
+    if (gw->discovery_tev) {
+        event_free(gw->discovery_tev);
+        gw->discovery_tev = NULL;
+    }
+
+    if (gw->udp_disco_ev) {
+        event_free(gw->udp_disco_ev);
+        gw->udp_disco_ev = NULL;
+    }
+    if (gw->disco_sock) {
+        close(gw->disco_sock);
+        gw->disco_sock = 0;
+    }
+
+    if (gw->udp_event_ev) {
+        event_free(gw->udp_event_ev);
+        gw->udp_event_ev = NULL;
+    }
+    if (gw->udp_sock) {
+        close(gw->udp_sock);
+        gw->udp_sock = 0;
+    }
+
+    if (gw->local_query_tev) {
+        event_free(gw->local_query_tev);
+        gw->local_query_tev = NULL;
+    }
+
+    if (gw->query_tev) {
+        event_free(gw->query_tev);
+        gw->query_tev = NULL;
+    }
+
+    if (gw->sigterm_ev) {
+        event_free(gw->sigterm_ev);
+        gw->sigterm_ev = NULL;
+    }
+
+    if (gw->sigint_ev) {
+        event_free(gw->sigint_ev);
+        gw->sigint_ev = NULL;
+    }
+
+    if (gw->event_base) {
+        event_base_free(gw->event_base);
+        gw->event_base = NULL;
+    }
     char pidpath[PATH_MAX];
     fprintf(stderr, "Terminating amtgwd\n");
     snprintf(pidpath, MAXPATHLEN, "%s/%s.pid", GW_PID_FILE_PATH, "amtgwd");
@@ -127,8 +204,21 @@ init_signal_handler(gw_t* gw)
         exit(1);
     }
 
-    if (signal(SIGTERM, gw_shutdown) == SIG_ERR) {
-        fprintf(stderr, "%s: couldn't install SIGTERM handler\n", gw->name);
+//    if (signal(SIGTERM, gw_shutdown) == SIG_ERR) {
+//        fprintf(stderr, "%s: couldn't install SIGTERM handler\n", gw->name);
+//        exit(1);
+//    }
+    gw->sigterm_ev = event_new(gw->event_base, SIGTERM, EV_SIGNAL,
+            gw_event_loopbreak, (void*) gw);
+    if (event_add(gw->sigterm_ev, NULL)) {
+        fprintf(stderr, "%s: couldn't install SIGINT handler\n", gw->name);
+        exit(1);
+    }
+
+    gw->sigint_ev = event_new(gw->event_base, SIGINT, EV_SIGNAL,
+            gw_event_loopbreak, (void*) gw);
+    if (event_add(gw->sigint_ev, NULL)) {
+        fprintf(stderr, "%s: couldn't install SIGINT handler\n", gw->name);
         exit(1);
     }
 }
@@ -160,6 +250,7 @@ main(int argc, char** argv)
     gw_t gw;
 
     bzero(&gw, sizeof(gw_t));
+    gw.amt_port = 2268;
     rc = gateway_parse_command_line(&gw, argc, argv);
     /*
      * save name
@@ -226,8 +317,13 @@ main(int argc, char** argv)
     }
 
     rc = event_base_dispatch(gw.event_base);
-    fprintf(stderr, "%s: Unexpected exit from event_base_dispatch: %s\n",
-            gw.name, strerror(errno));
+    if (rc) {
+        fprintf(stderr, "%s: Unexpected exit from event_base_dispatch: %s\n",
+                gw.name, strerror(errno));
+    } else {
+        fprintf(stderr, "%s: Terminating immediately\n", gw.name);
+    }
+    gw_free(&gw);
 
     exit(rc);
 }
